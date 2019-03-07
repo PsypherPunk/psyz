@@ -1,0 +1,10 @@
+PsyZ v0.3
+
+24.09.2007
+This is the initial release. Obviously this requires that Perl is installed. In addition, libmtp (http://libmtp.sourceforge.net/) should be installed. Simple documentation can be obtained by passing the '--help' (or '-h') parameter:
+
+	psyz --help
+
+Contact me at:
+http://www.psypherpunk.org.uk
+psyz@psypherpunk.org.uk

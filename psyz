@@ -1,0 +1,247 @@
+#!/usr/bin/perl -w
+###############################################################################
+# Copyright ( C ) 2007  Roger G. Coram
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+use strict;
+use warnings;
+
+use Digest::MD5 "md5_hex";
+use LWP::UserAgent;
+use Date::Parse;
+use URI::Escape;
+
+my ( $username, $password, $time, $session_id, $submit_url, @track_details, @content, $current_time, $total_duration );
+my $binary = `which mtp-tracks`;
+chomp( $binary );
+
+if( !&process_args ) {
+	die "Invalid parameter.\n";
+}
+if( !( -x "$binary" ) ) {
+	die "Dependency error: cannot execute $binary.\n";
+}
+print "Connecting to Zen...\n";
+if( &track_info ) {
+	my ( $handshakeOK, $submitOK );
+	print "Collected track information.\n";
+	do {
+		$handshakeOK = &handshake;
+		if( $handshakeOK eq "OK" ) {
+			$submitOK = &submit;
+		}
+	} until ( ( $handshakeOK eq "OK" && $submitOK eq "OK" ) || $handshakeOK ne "OK" );
+} else {
+	die "Unable to collect track information from ZEN.\n";
+}
+
+sub track_info {
+	my $track_counter = -1;
+	my ( @lines, $line, $line_counter );
+	$total_duration = 0;
+	open ( MTPTRACKS, "mtp-tracks |" );
+	@lines = <MTPTRACKS>;
+	foreach $line_counter ( 0 .. $#lines ) {
+		$line = $lines[ $line_counter ];
+		chomp( $line );
+		if( $line =~ m/   Artist\: (.*)/ ) {
+			$track_details[ $track_counter ][ 0 ] = "$1";
+		} elsif( $line =~ m/   Title\: (.*)/ ) {
+			$track_details[ $track_counter ][ 1 ] = "$1";
+		} elsif( $line =~ m/   Album\: (.*)/ ) {
+			$track_details[ $track_counter ][ 2 ] = "$1";
+		} elsif( $line =~ m/   Track number\: (.*)/ ) {
+			$track_details[ $track_counter ][ 4 ] = "$1";
+		} elsif( $line =~ m/Track ID\: / ) {
+			$track_counter++;
+			$track_details[ $track_counter ][ 3 ] = "0";
+		} elsif( $line =~ m/   Duration\: (.*) milliseconds/ ) {
+			$line = ( $1 / 1000 );
+			$track_details[ $track_counter ][ 5 ] = $line;
+			if( $lines[ $line_counter + 3 ] =~ m/Use count\: (.*) times/ ) {
+				$total_duration += ( $line * $1 );
+				$track_details[ $track_counter ][ 3 ] = "$1";
+			}
+		}
+	}
+	close( MTPTRACKS );
+	if( $time = $current_time ) {
+		$time -= $total_duration;
+	}
+	if( @track_details ) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+sub handshake {
+	my ( $request, $response, $user_agent, $handshake );
+	my $client_id = "psz";
+	my $client_ver = "0.1";
+	my $token = md5_hex( md5_hex( $password ).$current_time );
+	my $pause = 1;
+
+	$handshake = "http://post.audioscrobbler.com/?hs=true&p=1.2".
+			"&c=".$client_id.
+			"&v=".$client_ver.
+			"&u=".$username.
+			"&t=".$current_time.
+			"&a=".$token;
+	$request = new HTTP::Request( 'GET', "$handshake" );
+	if( !$request ) {
+		print "Could not initialise handshake.\n";
+		return "FAILED";
+	}
+	$user_agent = new LWP::UserAgent();
+	if( !$request ) {
+		print "Could not create User Agent.\n";
+		return "FAILED";
+	}
+	while ( $pause < 120 ) {
+		print "Performing handshake with Last.fm server...\n";
+		$response = $user_agent->request( $request );
+		if( !$response ) {
+			print "Did not receive handshake response.\n";
+			return "FAILED";
+		} elsif( !$response->is_success() ) {
+			print "Did not complete handshake succesfully:\n".$response->status_line();
+			return "FAILED";
+		}
+		@content = split /[ \r\n ]+/, $response->content();
+		if( $content[ 0 ] eq "OK" ) {
+			print "Handshake successful ( $content[ 0 ] ).\n";
+			last;
+		} elsif( $content[ 0 ] eq "BANNED" ) {
+			print "Client version banned from server.\n";
+			last;
+		} elsif( $content[ 0 ] eq "BADAUTH" ) {
+			print "Authentication details incorrect.\n";
+			last;
+		} elsif( $content[ 0 ] eq "BADTIME" ) {
+			print "The timestamp provided was not close enough to the current time.\n";
+			last;
+		} elsif( $content[ 0 ] =~ m/FAILED/ ) {
+			print "Temporary server failure:\n$content[ 0 ]\nPausing for $pause minute( s ).\n";
+			sleep ( $pause * 60 );
+			$pause *= 2;
+		} else {
+			print "Handshake response not successful:\n@content\nPausing for $pause minute( s ).\n";
+			sleep ( $pause * 60 );
+			$pause *= 2;
+		}
+	}
+	return $content[ 0 ];
+}
+
+sub submit {
+	my ( $failure, $counter, $track_counter );
+	my ( $submission, $track, $request, $user_agent, $response, @sub_content );
+
+	$failure = $counter = $track_counter = 0;
+	$session_id = $content[ 1 ];
+	$submit_url = $content[ 3 ];
+	$submission = "s=".$session_id;
+	foreach $track_counter ( 0 .. $#track_details ) {
+		$track = 0;
+		while ( $track < $track_details[ $track_counter ][ 3 ] ) {
+			$submission .=  "&a[$counter]=".uri_escape( $track_details[ $track_counter ][ 0 ] ).
+					"&t[$counter]=".uri_escape( $track_details[ $track_counter ][ 1 ] ).
+					"&i[$counter]=".$time.
+					"&o[$counter]=P".
+					"&r[$counter]=".
+					"&l[$counter]=".uri_escape( $track_details[ $track_counter ][ 5 ] ).
+					"&b[$counter]=".uri_escape( $track_details[ $track_counter ][ 2 ] ).
+					"&n[$counter]=".uri_escape( $track_details[ $track_counter ][ 4 ] ).
+					"&m[$counter]=";
+			$time += $track_details[ $track_counter ][ 5 ];
+			$track++;
+			$counter++;
+		}
+	}
+	if( !$counter ) {
+		die "Nothing to submit.\n";
+	}
+	$user_agent = new LWP::UserAgent();
+	$request = HTTP::Request->new( 'POST', $submit_url );
+	if( !$request ) {
+		print "Could not initialise submission.\n";
+		return undef;
+	}
+	$request->content_type( 'application/x-www-form-urlencoded; charset="UTF-8"' );
+	$request->content( $submission );
+	$request->content_length( length( $submission ) );
+	while ( $failure < 3 ) {
+		print "Making submission to server...\n";
+		$response = $user_agent->request( $request );
+		if( !$response ) {
+			print "Could not get a response to submission.\n";
+			return "FAILED";
+		} elsif( !$response->is_success() ) {
+			print "Submission incomplete: ".$response->status_line()."\n";
+			return "FAILED";
+		}
+		@sub_content = split /[ \r\n ]+/, $response->content();
+		if( $sub_content[ 0 ] eq "OK" ) {
+			print "Tracks submitted successfully ( $sub_content[ 0 ] )!\n";
+			return "$sub_content[ 0 ]";
+		} elsif( $sub_content[ 0 ] eq "BADSESSION" ) {
+			print "Session ID invalid.\n";
+			$failure++;
+		} elsif( $sub_content[ 0 ] eq "FAILED" ) {
+			print "A failure has occurred somewhere:\n$sub_content[ 0 ]\n";
+			$failure++;
+		} else {
+			print "Submission response is:\n@sub_content\n";
+			$failure++;
+		}
+	}
+	print "Falling back to handshake.\n";
+	return "FAILED";
+}
+
+sub process_args {
+	my $arg;
+	$current_time = $time = time();
+	if( @ARGV ) {
+		if( $ARGV[ 0 ] eq "--help" || $ARGV[ 0 ] eq "-h" ) {
+			die "\nPsyZ has 3 possible input parameters:\n\n-u\t\tLast.fm username\n-p\t\tLast.fm password\n\t\tIf omitted PsyZ will attempt to retrieve the values stored in amaroK.\n-t\t\tTime for first submission.\n\t\tThis should a quoted string in any\n\t\tformat recognised by str2time().\n\t\tDefaults to current system time less total playtime.\n\ne.g.\n\$> psyz -u psypherpunk -p ***** -t \"Mon Sep 24 11:08:00 2007\"\n";
+		}
+		foreach $arg ( 0. .. $#ARGV ) {
+			if( $ARGV[ $arg ] eq "-t" ) {
+				$time = str2time( $ARGV[ $arg + 1 ] );
+			} elsif( $ARGV[ $arg ] eq "-u" ) {
+				$username = $ARGV[ $arg + 1 ];
+			} elsif( $ARGV[ $arg ] eq "-p" ) {
+				$password = $ARGV[ $arg + 1 ];
+			}
+		}
+	}
+	if( !$username ) {
+		$username = `dcop amarok script readConfig ScrobblerUsername`;
+		chomp( $username );
+	}
+	if( !$password ) {
+		$password = `dcop amarok script readConfig ScrobblerPassword`;
+		chomp( $password );
+	}
+	if( $username && $password && $time ) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
